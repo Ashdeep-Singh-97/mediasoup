@@ -1,0 +1,218 @@
+import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import * as mediasoup from 'mediasoup';
+
+const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: '*', // Allow all origins for debugging
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+});
+
+let worker: mediasoup.types.Worker;
+let router: mediasoup.types.Router;
+let producerTransport: mediasoup.types.WebRtcTransport | undefined;
+let consumerTransport: mediasoup.types.WebRtcTransport | undefined;
+let producer: mediasoup.types.Producer | undefined;
+let consumer: mediasoup.types.Consumer | undefined;
+
+async function startMediasoup() {
+  console.log('LOG: Starting Mediasoup worker');
+  worker = await mediasoup.createWorker({
+    rtcMinPort: 2000,
+    rtcMaxPort: 2020,
+  });
+  console.log('LOG: Worker created, PID:', worker.pid);
+
+  worker.on('died', () => {
+    console.error('LOG: Mediasoup worker died, exiting in 2 seconds...');
+    setTimeout(() => process.exit(1), 2000);
+  });
+
+  router = await worker.createRouter({
+    mediaCodecs: [
+      {
+        kind: 'video',
+        mimeType: 'video/VP8',
+        clockRate: 90000,
+      },
+    ],
+  });
+  console.log('LOG: Router created, codecs:', router.rtpCapabilities.codecs);
+}
+
+async function createWebRtcTransport() {
+  console.log('LOG: Creating WebRTC transport');
+  const transport = await router.createWebRtcTransport({
+    listenIps: [{ ip: '0.0.0.0', announcedIp: '127.0.0.1' }],
+    enableUdp: true,
+    enableTcp: true,
+    preferUdp: true,
+  });
+  console.log('LOG: Transport created, ID:', transport.id);
+  console.log('LOG: Transport ICE parameters:', transport.iceParameters);
+  console.log('LOG: Transport ICE candidates:', transport.iceCandidates);
+  return transport;
+}
+
+app.get('/', (_req, res) => {
+  console.log('LOG: GET / request received');
+  res.send('Mediasoup server running!');
+});
+
+io.on('connection', async (socket) => {
+  console.log('LOG: Client connected, socket ID:', socket.id);
+  console.log('LOG: Client origin:', socket.handshake.headers.origin);
+
+  socket.on('getRouterRtpCapabilities', (callback) => {
+    console.log('LOG: Client requested router RTP capabilities');
+    console.log('LOG: Sending RTP capabilities:', router.rtpCapabilities);
+    callback(router.rtpCapabilities);
+  });
+
+  socket.on('createProducerTransport', async (callback) => {
+    console.log('LOG: Creating producer transport');
+    producerTransport = await createWebRtcTransport();
+    console.log('LOG: Producer transport created, ID:', producerTransport.id);
+    callback({
+      id: producerTransport.id,
+      iceParameters: producerTransport.iceParameters,
+      iceCandidates: producerTransport.iceCandidates,
+      dtlsParameters: producerTransport.dtlsParameters,
+    });
+    console.log('LOG: Producer transport data sent to client');
+  });
+
+  socket.on('connectProducerTransport', async ({ dtlsParameters }, callback) => {
+    console.log('LOG: Connecting producer transport, DTLS:', dtlsParameters);
+    if (producerTransport) {
+      try {
+        await producerTransport.connect({ dtlsParameters });
+        console.log('LOG: Producer transport connected, ID:', producerTransport.id);
+        callback();
+      } catch (error) {
+        console.error('LOG: Error connecting producer transport:', error);
+        callback({ error: 'Failed to connect producer transport' });
+      }
+    } else {
+      console.error('LOG: Producer transport not found');
+      callback({ error: 'Producer transport not found' });
+    }
+  });
+
+  socket.on('produce', async ({ kind, rtpParameters }, callback) => {
+    console.log('LOG: Producing media, kind:', kind, 'RTP:', rtpParameters);
+    if (producerTransport) {
+      try {
+        producer = await producerTransport.produce({ kind, rtpParameters });
+        console.log('LOG: Producer created, ID:', producer.id, 'Kind:', producer.kind);
+        console.log('LOG: Producer state:', producer.closed);
+        callback({ id: producer.id });
+      } catch (error) {
+        console.error('LOG: Error creating producer:', error);
+        callback({ error: 'Failed to create producer' });
+      }
+    } else {
+      console.error('LOG: Producer transport not found');
+      callback({ error: 'Producer transport not found' });
+    }
+  });
+
+  socket.on('createConsumerTransport', async (callback) => {
+    console.log('LOG: Creating consumer transport');
+    consumerTransport = await createWebRtcTransport();
+    console.log('LOG: Consumer transport created, ID:', consumerTransport.id);
+    callback({
+      id: consumerTransport.id,
+      iceParameters: consumerTransport.iceParameters,
+      iceCandidates: consumerTransport.iceCandidates,
+      dtlsParameters: consumerTransport.dtlsParameters,
+    });
+    console.log('LOG: Consumer transport data sent to client');
+  });
+
+  socket.on('connectConsumerTransport', async ({ dtlsParameters }, callback) => {
+    console.log('LOG: Connecting consumer transport, DTLS:', dtlsParameters);
+    if (consumerTransport) {
+      try {
+        await consumerTransport.connect({ dtlsParameters });
+        console.log('LOG: Consumer transport connected, ID:', consumerTransport.id);
+        callback();
+      } catch (error) {
+        console.error('LOG: Error connecting consumer transport:', error);
+        callback({ error: 'Failed to connect consumer transport' });
+      }
+    } else {
+      console.error('LOG: Consumer transport not found');
+      callback({ error: 'Consumer transport not found' });
+    }
+  });
+
+  socket.on('consume', async ({ rtpCapabilities }, callback) => {
+    console.log('LOG: Consuming media, RTP capabilities:', rtpCapabilities);
+    console.log('LOG: Producer exists:', !!producer, 'Producer ID:', producer?.id);
+    if (!producer) {
+      console.error('LOG: Cannot consume: No producer exists');
+      callback({ error: 'No producer exists' });
+      return;
+    }
+    console.log('LOG: Checking if router can consume, producerId:', producer.id);
+    if (!router.canConsume({ producerId: producer.id, rtpCapabilities })) {
+      console.error('LOG: Cannot consume: Incompatible RTP capabilities');
+      console.log('LOG: Router RTP capabilities:', router.rtpCapabilities);
+      callback({ error: 'Incompatible RTP capabilities' });
+      return;
+    }
+    if (!consumerTransport) {
+      console.error('LOG: Cannot consume: No consumer transport exists');
+      callback({ error: 'No consumer transport exists' });
+      return;
+    }
+    try {
+      consumer = await consumerTransport.consume({
+        producerId: producer.id,
+        rtpCapabilities,
+        paused: false,
+      });
+      console.log('LOG: Consumer created, ID:', consumer.id, 'Kind:', consumer.kind);
+      console.log('LOG: Consumer state:', consumer.closed);
+      callback({
+        producerId: producer.id,
+        id: consumer.id,
+        kind: consumer.kind,
+        rtpParameters: consumer.rtpParameters,
+      });
+    } catch (error) {
+      console.error('LOG: Error creating consumer:', error);
+      callback({ error: 'Failed to create consumer' });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log('LOG: Client disconnected, socket ID:', socket.id);
+    console.log('LOG: Closing producer and consumer');
+    producer?.close();
+    consumer?.close();
+    producerTransport?.close();
+    consumerTransport?.close();
+    producer = undefined;
+    consumer = undefined;
+    producerTransport = undefined;
+    consumerTransport = undefined;
+    console.log('LOG: Cleanup complete');
+  });
+});
+
+async function startServer() {
+  console.log('LOG: Starting server');
+  await startMediasoup();
+  httpServer.listen(5000, () => {
+    console.log('LOG: Server running on http://localhost:5000');
+  });
+}
+
+startServer();
