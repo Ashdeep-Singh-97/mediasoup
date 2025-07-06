@@ -50,9 +50,9 @@ const io = new socket_io_1.Server(httpServer, {
 });
 let worker;
 let router;
-let producerTransport;
-let consumerTransport;
-let producers = {};
+// Store transports and producers by socket ID
+const transports = {};
+const producers = {};
 let consumer;
 function startMediasoup() {
     return __awaiter(this, void 0, void 0, function* () {
@@ -106,25 +106,28 @@ app.get('/', (_req, res) => {
 io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
     console.log('LOG: Client connected, socket ID:', socket.id);
     console.log('LOG: Client origin:', socket.handshake.headers.origin);
+    transports[socket.id] = {};
+    producers[socket.id] = [];
     socket.on('getRouterRtpCapabilities', (callback) => {
         console.log('LOG: Client requested router RTP capabilities');
         console.log('LOG: Sending RTP capabilities:', router.rtpCapabilities);
         callback(router.rtpCapabilities);
     });
     socket.on('createProducerTransport', (callback) => __awaiter(void 0, void 0, void 0, function* () {
-        console.log('LOG: Creating producer transport');
-        producerTransport = yield createWebRtcTransport();
-        console.log('LOG: Producer transport created, ID:', producerTransport.id);
+        console.log('LOG: Creating producer transport for socket:', socket.id);
+        transports[socket.id].producerTransport = yield createWebRtcTransport();
+        console.log('LOG: Producer transport created, ID:', transports[socket.id].producerTransport.id);
         callback({
-            id: producerTransport.id,
-            iceParameters: producerTransport.iceParameters,
-            iceCandidates: producerTransport.iceCandidates,
-            dtlsParameters: producerTransport.dtlsParameters,
+            id: transports[socket.id].producerTransport.id,
+            iceParameters: transports[socket.id].producerTransport.iceParameters,
+            iceCandidates: transports[socket.id].producerTransport.iceCandidates,
+            dtlsParameters: transports[socket.id].producerTransport.dtlsParameters,
         });
         console.log('LOG: Producer transport data sent to client');
     }));
     socket.on('connectProducerTransport', (_a, callback_1) => __awaiter(void 0, [_a, callback_1], void 0, function* ({ dtlsParameters }, callback) {
         console.log('LOG: Connecting producer transport, DTLS:', dtlsParameters);
+        const producerTransport = transports[socket.id].producerTransport;
         if (producerTransport) {
             try {
                 yield producerTransport.connect({ dtlsParameters });
@@ -132,49 +135,54 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
                 callback();
             }
             catch (error) {
-                console.error('LOG: Error connecting producer transport:', error);
+                console.error('LOG: Error connecting producer transport:', error.message);
                 callback({ error: 'Failed to connect producer transport' });
             }
         }
         else {
-            console.error('LOG: Producer transport not found');
+            console.error('LOG: Producer transport not found for socket:', socket.id);
             callback({ error: 'Producer transport not found' });
         }
     }));
     socket.on('produce', (_a, callback_1) => __awaiter(void 0, [_a, callback_1], void 0, function* ({ kind, rtpParameters }, callback) {
         console.log('LOG: Producing media, kind:', kind, 'RTP:', rtpParameters);
+        const producerTransport = transports[socket.id].producerTransport;
         if (producerTransport) {
             try {
                 const producer = yield producerTransport.produce({ kind, rtpParameters });
-                producers[producer.kind] = producer;
-                console.log('LOG: Producer created, ID:', producer.id, 'Kind:', producer.kind);
+                producers[socket.id].push(producer);
+                console.log('LOG: Producer created, ID:', producer.id, 'Kind:', producer.kind, 'Socket:', socket.id);
                 console.log('LOG: Producer state:', producer.closed);
+                // Notify all clients about available producers
+                io.emit('producersAvailable', { socketId: socket.id, kind: producer.kind });
+                console.log('LOG: Emitted producersAvailable for kind:', producer.kind);
                 callback({ id: producer.id, kind: producer.kind });
             }
             catch (error) {
-                console.error('LOG: Error creating producer:', error);
+                console.error('LOG: Error creating producer:', error.message);
                 callback({ error: 'Failed to create producer' });
             }
         }
         else {
-            console.error('LOG: Producer transport not found');
+            console.error('LOG: Producer transport not found for socket:', socket.id);
             callback({ error: 'Producer transport not found' });
         }
     }));
     socket.on('createConsumerTransport', (callback) => __awaiter(void 0, void 0, void 0, function* () {
-        console.log('LOG: Creating consumer transport');
-        consumerTransport = yield createWebRtcTransport();
-        console.log('LOG: Consumer transport created, ID:', consumerTransport.id);
+        console.log('LOG: Creating consumer transport for socket:', socket.id);
+        transports[socket.id].consumerTransport = yield createWebRtcTransport();
+        console.log('LOG: Consumer transport created, ID:', transports[socket.id].consumerTransport.id);
         callback({
-            id: consumerTransport.id,
-            iceParameters: consumerTransport.iceParameters,
-            iceCandidates: consumerTransport.iceCandidates,
-            dtlsParameters: consumerTransport.dtlsParameters,
+            id: transports[socket.id].consumerTransport.id,
+            iceParameters: transports[socket.id].consumerTransport.iceParameters,
+            iceCandidates: transports[socket.id].consumerTransport.iceCandidates,
+            dtlsParameters: transports[socket.id].consumerTransport.dtlsParameters,
         });
         console.log('LOG: Consumer transport data sent to client');
     }));
     socket.on('connectConsumerTransport', (_a, callback_1) => __awaiter(void 0, [_a, callback_1], void 0, function* ({ dtlsParameters }, callback) {
         console.log('LOG: Connecting consumer transport, DTLS:', dtlsParameters);
+        const consumerTransport = transports[socket.id].consumerTransport;
         if (consumerTransport) {
             try {
                 yield consumerTransport.connect({ dtlsParameters });
@@ -182,32 +190,39 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
                 callback();
             }
             catch (error) {
-                console.error('LOG: Error connecting consumer transport:', error);
+                console.error('LOG: Error connecting consumer transport:', error.message);
                 callback({ error: 'Failed to connect consumer transport' });
             }
         }
         else {
-            console.error('LOG: Consumer transport not found');
+            console.error('LOG: Consumer transport not found for socket:', socket.id);
             callback({ error: 'Consumer transport not found' });
         }
     }));
-    socket.on('consume', (_a, callback_1) => __awaiter(void 0, [_a, callback_1], void 0, function* ({ rtpCapabilities }, callback) {
-        console.log('LOG: Consuming media, RTP capabilities:', rtpCapabilities);
-        console.log('LOG: Available producers:', Object.keys(producers));
-        const videoProducer = producers['video'];
-        if (!videoProducer) {
-            console.error('LOG: Cannot consume: No video producer exists');
-            callback({ error: 'No video producer exists' });
+    socket.on('consume', (_a, callback_1) => __awaiter(void 0, [_a, callback_1], void 0, function* ({ rtpCapabilities, kind }, callback) {
+        console.log('LOG: Consuming media, kind:', kind, 'RTP capabilities:', rtpCapabilities);
+        console.log('LOG: Available producers:', Object.entries(producers).map(([socketId, prods]) => ({ socketId, producers: prods.map(p => ({ id: p.id, kind: p.kind })) })));
+        // Find the first video producer (assuming teacher is the only producer for now)
+        let producer;
+        for (const socketId in producers) {
+            producer = producers[socketId].find(p => p.kind === kind);
+            if (producer)
+                break;
+        }
+        if (!producer) {
+            console.error(`LOG: Cannot consume: No ${kind} producer exists`);
+            callback({ error: `No ${kind} producer exists` });
             return;
         }
-        console.log('LOG: Video producer found, ID:', videoProducer.id);
-        if (!router.canConsume({ producerId: videoProducer.id, rtpCapabilities })) {
-            console.error('LOG: Cannot consume: Incompatible RTP capabilities');
+        console.log(`LOG: ${kind} producer found, ID:`, producer.id);
+        if (!router.canConsume({ producerId: producer.id, rtpCapabilities })) {
+            console.error(`LOG: Cannot consume: Incompatible RTP capabilities for ${kind}`);
             console.log('LOG: Router RTP capabilities:', router.rtpCapabilities);
             console.log('LOG: Client RTP capabilities:', rtpCapabilities);
-            callback({ error: 'Incompatible RTP capabilities' });
+            callback({ error: `Incompatible RTP capabilities for ${kind}` });
             return;
         }
+        const consumerTransport = transports[socket.id].consumerTransport;
         if (!consumerTransport) {
             console.error('LOG: Cannot consume: No consumer transport exists');
             callback({ error: 'No consumer transport exists' });
@@ -215,36 +230,38 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
         }
         try {
             consumer = yield consumerTransport.consume({
-                producerId: videoProducer.id,
+                producerId: producer.id,
                 rtpCapabilities,
                 paused: false,
             });
             console.log('LOG: Consumer created, ID:', consumer.id, 'Kind:', consumer.kind);
             console.log('LOG: Consumer state:', consumer.closed);
             callback({
-                producerId: videoProducer.id,
+                producerId: producer.id,
                 id: consumer.id,
                 kind: consumer.kind,
                 rtpParameters: consumer.rtpParameters,
             });
         }
         catch (error) {
-            console.error('LOG: Error creating consumer:', error);
+            console.error('LOG: Error creating consumer:', error.message);
             callback({ error: 'Failed to create consumer' });
         }
     }));
     socket.on('disconnect', () => {
+        var _a, _b, _c, _d, _e;
         console.log('LOG: Client disconnected, socket ID:', socket.id);
-        console.log('LOG: Closing producers and consumer');
-        Object.values(producers).forEach((producer) => producer.close());
+        console.log('LOG: Closing producers and consumer for socket:', socket.id);
+        (_a = producers[socket.id]) === null || _a === void 0 ? void 0 : _a.forEach((producer) => producer.close());
         consumer === null || consumer === void 0 ? void 0 : consumer.close();
-        producerTransport === null || producerTransport === void 0 ? void 0 : producerTransport.close();
-        consumerTransport === null || consumerTransport === void 0 ? void 0 : consumerTransport.close();
-        producers = {};
+        (_c = (_b = transports[socket.id]) === null || _b === void 0 ? void 0 : _b.producerTransport) === null || _c === void 0 ? void 0 : _c.close();
+        (_e = (_d = transports[socket.id]) === null || _d === void 0 ? void 0 : _d.consumerTransport) === null || _e === void 0 ? void 0 : _e.close();
+        delete producers[socket.id];
+        delete transports[socket.id];
         consumer = undefined;
-        producerTransport = undefined;
-        consumerTransport = undefined;
-        console.log('LOG: Cleanup complete');
+        console.log('LOG: Cleanup complete for socket:', socket.id);
+        // Notify clients that producers may have changed
+        io.emit('producersAvailable', { socketId: socket.id, kind: null });
     });
 }));
 function startServer() {
