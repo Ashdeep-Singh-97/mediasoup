@@ -43,7 +43,7 @@ const app = (0, express_1.default)();
 const httpServer = (0, http_1.createServer)(app);
 const io = new socket_io_1.Server(httpServer, {
     cors: {
-        origin: ['http://localhost:5173', 'http://localhost:3000'],
+        origin: '*',
         methods: ['GET', 'POST'],
         credentials: true,
     },
@@ -52,7 +52,7 @@ let worker;
 let router;
 let producerTransport;
 let consumerTransport;
-let producer;
+let producers = {};
 let consumer;
 function startMediasoup() {
     return __awaiter(this, void 0, void 0, function* () {
@@ -72,6 +72,12 @@ function startMediasoup() {
                     kind: 'video',
                     mimeType: 'video/VP8',
                     clockRate: 90000,
+                },
+                {
+                    kind: 'audio',
+                    mimeType: 'audio/opus',
+                    clockRate: 48000,
+                    channels: 2,
                 },
             ],
         });
@@ -99,6 +105,7 @@ app.get('/', (_req, res) => {
 });
 io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
     console.log('LOG: Client connected, socket ID:', socket.id);
+    console.log('LOG: Client origin:', socket.handshake.headers.origin);
     socket.on('getRouterRtpCapabilities', (callback) => {
         console.log('LOG: Client requested router RTP capabilities');
         console.log('LOG: Sending RTP capabilities:', router.rtpCapabilities);
@@ -138,10 +145,11 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
         console.log('LOG: Producing media, kind:', kind, 'RTP:', rtpParameters);
         if (producerTransport) {
             try {
-                producer = yield producerTransport.produce({ kind, rtpParameters });
+                const producer = yield producerTransport.produce({ kind, rtpParameters });
+                producers[producer.kind] = producer;
                 console.log('LOG: Producer created, ID:', producer.id, 'Kind:', producer.kind);
                 console.log('LOG: Producer state:', producer.closed);
-                callback({ id: producer.id });
+                callback({ id: producer.id, kind: producer.kind });
             }
             catch (error) {
                 console.error('LOG: Error creating producer:', error);
@@ -185,16 +193,18 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
     }));
     socket.on('consume', (_a, callback_1) => __awaiter(void 0, [_a, callback_1], void 0, function* ({ rtpCapabilities }, callback) {
         console.log('LOG: Consuming media, RTP capabilities:', rtpCapabilities);
-        console.log('LOG: Producer exists:', !!producer, 'Producer ID:', producer === null || producer === void 0 ? void 0 : producer.id);
-        if (!producer) {
-            console.error('LOG: Cannot consume: No producer exists');
-            callback({ error: 'No producer exists' });
+        console.log('LOG: Available producers:', Object.keys(producers));
+        const videoProducer = producers['video'];
+        if (!videoProducer) {
+            console.error('LOG: Cannot consume: No video producer exists');
+            callback({ error: 'No video producer exists' });
             return;
         }
-        console.log('LOG: Checking if router can consume, producerId:', producer.id);
-        if (!router.canConsume({ producerId: producer.id, rtpCapabilities })) {
+        console.log('LOG: Video producer found, ID:', videoProducer.id);
+        if (!router.canConsume({ producerId: videoProducer.id, rtpCapabilities })) {
             console.error('LOG: Cannot consume: Incompatible RTP capabilities');
             console.log('LOG: Router RTP capabilities:', router.rtpCapabilities);
+            console.log('LOG: Client RTP capabilities:', rtpCapabilities);
             callback({ error: 'Incompatible RTP capabilities' });
             return;
         }
@@ -205,14 +215,14 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
         }
         try {
             consumer = yield consumerTransport.consume({
-                producerId: producer.id,
+                producerId: videoProducer.id,
                 rtpCapabilities,
                 paused: false,
             });
             console.log('LOG: Consumer created, ID:', consumer.id, 'Kind:', consumer.kind);
             console.log('LOG: Consumer state:', consumer.closed);
             callback({
-                producerId: producer.id,
+                producerId: videoProducer.id,
                 id: consumer.id,
                 kind: consumer.kind,
                 rtpParameters: consumer.rtpParameters,
@@ -225,12 +235,12 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
     }));
     socket.on('disconnect', () => {
         console.log('LOG: Client disconnected, socket ID:', socket.id);
-        console.log('LOG: Closing producer and consumer');
-        producer === null || producer === void 0 ? void 0 : producer.close();
+        console.log('LOG: Closing producers and consumer');
+        Object.values(producers).forEach((producer) => producer.close());
         consumer === null || consumer === void 0 ? void 0 : consumer.close();
         producerTransport === null || producerTransport === void 0 ? void 0 : producerTransport.close();
         consumerTransport === null || consumerTransport === void 0 ? void 0 : consumerTransport.close();
-        producer = undefined;
+        producers = {};
         consumer = undefined;
         producerTransport = undefined;
         consumerTransport = undefined;
