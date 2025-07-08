@@ -50,9 +50,9 @@ const io = new socket_io_1.Server(httpServer, {
 });
 let worker;
 let router;
-// Store transports and producers by socket ID
 const transports = {};
 const producers = {};
+const roles = {}; // Track client roles
 let consumer;
 function startMediasoup() {
     return __awaiter(this, void 0, void 0, function* () {
@@ -108,6 +108,12 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
     console.log('LOG: Client origin:', socket.handshake.headers.origin);
     transports[socket.id] = {};
     producers[socket.id] = [];
+    // Set client role
+    socket.on('setRole', ({ role }, callback) => {
+        console.log('LOG: Setting role for socket:', socket.id, 'role:', role);
+        roles[socket.id] = role; // 'teacher' or 'student'
+        callback({ success: true });
+    });
     socket.on('getRouterRtpCapabilities', (callback) => {
         console.log('LOG: Client requested router RTP capabilities');
         console.log('LOG: Sending RTP capabilities:', router.rtpCapabilities);
@@ -153,7 +159,6 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
                 producers[socket.id].push(producer);
                 console.log('LOG: Producer created, ID:', producer.id, 'Kind:', producer.kind, 'Socket:', socket.id);
                 console.log('LOG: Producer state:', producer.closed);
-                // Notify all clients about available producers
                 io.emit('producersAvailable', { socketId: socket.id, kind: producer.kind });
                 console.log('LOG: Emitted producersAvailable for kind:', producer.kind);
                 callback({ id: producer.id, kind: producer.kind });
@@ -202,7 +207,6 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
     socket.on('consume', (_a, callback_1) => __awaiter(void 0, [_a, callback_1], void 0, function* ({ rtpCapabilities, kind }, callback) {
         console.log('LOG: Consuming media, kind:', kind, 'RTP capabilities:', rtpCapabilities);
         console.log('LOG: Available producers:', Object.entries(producers).map(([socketId, prods]) => ({ socketId, producers: prods.map(p => ({ id: p.id, kind: p.kind })) })));
-        // Find the first video producer (assuming teacher is the only producer for now)
         let producer;
         for (const socketId in producers) {
             producer = producers[socketId].find(p => p.kind === kind);
@@ -248,6 +252,14 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
             callback({ error: 'Failed to create consumer' });
         }
     }));
+    // Chat event
+    socket.on('chat', ({ message }, callback) => {
+        const role = roles[socket.id] || 'Unknown';
+        console.log(`LOG: Chat message received from ${role} (socket: ${socket.id}):`, message);
+        io.emit('chat', { role, message });
+        console.log('LOG: Broadcasted chat message:', { role, message });
+        callback({ success: true });
+    });
     socket.on('disconnect', () => {
         var _a, _b, _c, _d, _e;
         console.log('LOG: Client disconnected, socket ID:', socket.id);
@@ -258,9 +270,9 @@ io.on('connection', (socket) => __awaiter(void 0, void 0, void 0, function* () {
         (_e = (_d = transports[socket.id]) === null || _d === void 0 ? void 0 : _d.consumerTransport) === null || _e === void 0 ? void 0 : _e.close();
         delete producers[socket.id];
         delete transports[socket.id];
+        delete roles[socket.id];
         consumer = undefined;
         console.log('LOG: Cleanup complete for socket:', socket.id);
-        // Notify clients that producers may have changed
         io.emit('producersAvailable', { socketId: socket.id, kind: null });
     });
 }));

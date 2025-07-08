@@ -15,9 +15,9 @@ const io = new Server(httpServer, {
 
 let worker: mediasoup.types.Worker;
 let router: mediasoup.types.Router;
-// Store transports and producers by socket ID
 const transports: { [socketId: string]: { producerTransport?: mediasoup.types.WebRtcTransport; consumerTransport?: mediasoup.types.WebRtcTransport } } = {};
 const producers: { [socketId: string]: mediasoup.types.Producer[] } = {};
+const roles: { [socketId: string]: string } = {}; // Track client roles
 let consumer: mediasoup.types.Consumer | undefined;
 
 async function startMediasoup() {
@@ -76,6 +76,13 @@ io.on('connection', async (socket) => {
   transports[socket.id] = {};
   producers[socket.id] = [];
 
+  // Set client role
+  socket.on('setRole', ({ role }, callback) => {
+    console.log('LOG: Setting role for socket:', socket.id, 'role:', role);
+    roles[socket.id] = role; // 'teacher' or 'student'
+    callback({ success: true });
+  });
+
   socket.on('getRouterRtpCapabilities', (callback) => {
     console.log('LOG: Client requested router RTP capabilities');
     console.log('LOG: Sending RTP capabilities:', router.rtpCapabilities);
@@ -122,7 +129,6 @@ io.on('connection', async (socket) => {
         producers[socket.id].push(producer);
         console.log('LOG: Producer created, ID:', producer.id, 'Kind:', producer.kind, 'Socket:', socket.id);
         console.log('LOG: Producer state:', producer.closed);
-        // Notify all clients about available producers
         io.emit('producersAvailable', { socketId: socket.id, kind: producer.kind });
         console.log('LOG: Emitted producersAvailable for kind:', producer.kind);
         callback({ id: producer.id, kind: producer.kind });
@@ -170,7 +176,6 @@ io.on('connection', async (socket) => {
   socket.on('consume', async ({ rtpCapabilities, kind }, callback) => {
     console.log('LOG: Consuming media, kind:', kind, 'RTP capabilities:', rtpCapabilities);
     console.log('LOG: Available producers:', Object.entries(producers).map(([socketId, prods]) => ({ socketId, producers: prods.map(p => ({ id: p.id, kind: p.kind })) })));
-    // Find the first video producer (assuming teacher is the only producer for now)
     let producer: mediasoup.types.Producer | undefined;
     for (const socketId in producers) {
       producer = producers[socketId].find(p => p.kind === kind);
@@ -215,6 +220,15 @@ io.on('connection', async (socket) => {
     }
   });
 
+  // Chat event
+  socket.on('chat', ({ message }, callback) => {
+    const role = roles[socket.id] || 'Unknown';
+    console.log(`LOG: Chat message received from ${role} (socket: ${socket.id}):`, message);
+    io.emit('chat', { role, message });
+    console.log('LOG: Broadcasted chat message:', { role, message });
+    callback({ success: true });
+  });
+
   socket.on('disconnect', () => {
     console.log('LOG: Client disconnected, socket ID:', socket.id);
     console.log('LOG: Closing producers and consumer for socket:', socket.id);
@@ -224,9 +238,9 @@ io.on('connection', async (socket) => {
     transports[socket.id]?.consumerTransport?.close();
     delete producers[socket.id];
     delete transports[socket.id];
+    delete roles[socket.id];
     consumer = undefined;
     console.log('LOG: Cleanup complete for socket:', socket.id);
-    // Notify clients that producers may have changed
     io.emit('producersAvailable', { socketId: socket.id, kind: null });
   });
 });

@@ -8,18 +8,27 @@ const socket = io('http://localhost:5000', {
   reconnectionDelay: 1000,
 });
 
+interface ChatMessage {
+  role: string;
+  message: string;
+}
+
 const StudentPage: React.FC = () => {
   const [device, setDevice] = useState<Device | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [consumerTransport, setConsumerTransport] = useState<types.Transport | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState<string>('');
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
-  // Initialize device and consumer transport
   useEffect(() => {
     console.log('LOG: StudentPage useEffect [initialize] started');
     socket.on('connect', () => {
       console.log('LOG: Socket.IO connected, ID:', socket.id);
+      socket.emit('setRole', { role: 'student' }, ({ success }: { success: boolean }) => {
+        console.log('LOG: Role set to student, success:', success);
+      });
     });
     socket.on('connect_error', (err) => {
       console.error('LOG: Socket.IO connection error:', err.message);
@@ -29,15 +38,18 @@ const StudentPage: React.FC = () => {
       console.log('LOG: Socket.IO disconnected');
     });
 
+    socket.on('chat', ({ role, message }) => {
+      console.log('LOG: Chat message received:', { role, message });
+      setMessages((prev) => [...prev, { role, message }]);
+    });
+
     const initialize = async () => {
       try {
-        // Step 1: Initialize Mediasoup device
         console.log('LOG: 1. Initializing mediasoup-client Device');
         const device = new Device();
         console.log('LOG: Device created:', device);
         setDevice(device);
 
-        // Step 2: Fetch RTP capabilities
         console.log('LOG: 2. Fetching router RTP capabilities');
         let routerRtpCapabilities;
         let attempts = 0;
@@ -60,7 +72,7 @@ const StudentPage: React.FC = () => {
             });
             console.log('LOG: Router RTP capabilities received:', routerRtpCapabilities);
             break;
-          } catch (error  : any) {
+          } catch (error : any) {
             console.error('LOG: Attempt failed:', error.message);
             attempts++;
             if (attempts === maxAttempts) {
@@ -71,18 +83,16 @@ const StudentPage: React.FC = () => {
           }
         }
 
-        // Step 3: Load device
         console.log('LOG: 3. Loading device with RTP capabilities');
         try {
           await device.load({ routerRtpCapabilities });
           console.log('LOG: Device loaded, canConsume:', device.rtpCapabilities);
-        } catch (err  : any) {
+        } catch (err : any) {
           console.error('LOG: Device load failed:', err);
           setError(`Device load failed: ${err.message}`);
           return;
         }
 
-        // Step 4: Create consumer transport
         console.log('LOG: 4. Creating consumer transport');
         const consumerTransportData = await new Promise<any>((resolve, reject) => {
           console.log('LOG: Emitting createConsumerTransport');
@@ -129,11 +139,11 @@ const StudentPage: React.FC = () => {
       socket.off('connect');
       socket.off('connect_error');
       socket.off('disconnect');
+      socket.off('chat');
       socket.disconnect();
     };
   }, []);
 
-  // Consume media when device and consumerTransport are ready
   useEffect(() => {
     if (!device || !consumerTransport) {
       console.log('LOG: Waiting for device and consumerTransport, device:', !!device, 'consumerTransport:', !!consumerTransport);
@@ -174,7 +184,6 @@ const StudentPage: React.FC = () => {
           if (remoteVideoRef.current) {
             console.log('LOG: Setting remote video srcObject');
             remoteVideoRef.current.srcObject = remoteStream;
-            // Don't auto-play, wait for user interaction
             console.log('LOG: Remote video ready, waiting for user to start playback');
           } else {
             console.log('LOG: remoteVideoRef missing');
@@ -194,7 +203,6 @@ const StudentPage: React.FC = () => {
       }
     };
 
-    // Listen for producersAvailable and consume video
     socket.on('producersAvailable', ({ socketId, kind }) => {
       console.log('LOG: producersAvailable received, socketId:', socketId, 'kind:', kind);
       if (kind === 'video') {
@@ -202,7 +210,6 @@ const StudentPage: React.FC = () => {
       }
     });
 
-    // Try consuming video immediately
     consumeMedia('video');
 
     return () => {
@@ -211,7 +218,6 @@ const StudentPage: React.FC = () => {
     };
   }, [device, consumerTransport]);
 
-  // Handle manual video playback
   const startPlayback = () => {
     if (remoteVideoRef.current) {
       console.log('LOG: Starting video playback on user interaction');
@@ -228,8 +234,24 @@ const StudentPage: React.FC = () => {
     }
   };
 
+  const sendMessage = () => {
+    if (chatInput.trim()) {
+      console.log('LOG: Sending chat message:', chatInput);
+      socket.emit('chat', { message: chatInput }, ({ success }: { success: boolean }) => {
+        console.log('LOG: Chat message sent, success:', success);
+      });
+      setChatInput('');
+    }
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && chatInput.trim()) {
+      sendMessage();
+    }
+  };
+
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <h1>Student Dashboard</h1>
       {error && <p style={{ color: 'red' }}>{error}</p>}
       <div>
@@ -240,6 +262,27 @@ const StudentPage: React.FC = () => {
             Start Watching
           </button>
         )}
+      </div>
+      <div style={{ width: '600px', border: '1px solid #ccc', padding: '10px' }}>
+        <h3>Chat</h3>
+        <div style={{ height: '200px', overflowY: 'auto', border: '1px solid #ddd', padding: '10px', marginBottom: '10px' }}>
+          {messages.map((msg, index) => (
+            <div key={index}>
+              <strong>{msg.role}:</strong> {msg.message}
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <input
+            type="text"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyPress={handleKeyPress}
+            placeholder="Type a message..."
+            style={{ flex: 1, padding: '5px' }}
+          />
+          <button onClick={sendMessage}>Send</button>
+        </div>
       </div>
     </div>
   );

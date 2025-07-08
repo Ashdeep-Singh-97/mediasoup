@@ -8,12 +8,19 @@ const socket = io('http://localhost:5000', {
   reconnectionDelay: 1000,
 });
 
+interface ChatMessage {
+  role: string;
+  message: string;
+}
+
 const TeacherPage: React.FC = () => {
   const [device, setDevice] = useState<Device | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [muteVideo, setMuteVideo] = useState<boolean>(false);
   const [muteAudio, setMuteAudio] = useState<boolean>(false);
   const [screenSharing, setScreenSharing] = useState<boolean>(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState<string>('');
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -24,6 +31,9 @@ const TeacherPage: React.FC = () => {
     console.log('LOG: TeacherPage useEffect started');
     socket.on('connect', () => {
       console.log('LOG: Socket.IO connected, ID:', socket.id);
+      socket.emit('setRole', { role: 'teacher' }, ({ success }: { success: boolean }) => {
+        console.log('LOG: Role set to teacher, success:', success);
+      });
     });
     socket.on('connect_error', (err) => {
       console.error('LOG: Socket.IO connection error:', err.message);
@@ -33,9 +43,14 @@ const TeacherPage: React.FC = () => {
       console.log('LOG: Socket.IO disconnected');
     });
 
+    // Listen for chat messages
+    socket.on('chat', ({ role, message }) => {
+      console.log('LOG: Chat message received:', { role, message });
+      setMessages((prev) => [...prev, { role, message }]);
+    });
+
     const initialize = async () => {
       try {
-        // Step 1: Request user media
         console.log('LOG: 1. Requesting user media');
         if (!streamRef.current) {
           console.log('LOG: Calling getUserMedia');
@@ -75,13 +90,11 @@ const TeacherPage: React.FC = () => {
           return;
         }
 
-        // Step 2: Initialize Mediasoup device
         console.log('LOG: 2. Initializing mediasoup-client Device');
         const device = new Device();
         console.log('LOG: Device created:', device);
         setDevice(device);
 
-        // Step 3: Fetch RTP capabilities
         console.log('LOG: 3. Fetching router RTP capabilities');
         let routerRtpCapabilities;
         let attempts = 0;
@@ -115,7 +128,6 @@ const TeacherPage: React.FC = () => {
           }
         }
 
-        // Step 4: Load device
         console.log('LOG: 4. Loading device with RTP capabilities');
         try {
           await device.load({ routerRtpCapabilities });
@@ -132,7 +144,6 @@ const TeacherPage: React.FC = () => {
           return;
         }
 
-        // Step 5: Create producer transport
         console.log('LOG: 5. Creating producer transport');
         const producerTransportData = await new Promise<any>((resolve, reject) => {
           console.log('LOG: Emitting createProducerTransport');
@@ -172,7 +183,6 @@ const TeacherPage: React.FC = () => {
           console.log('LOG: Producer transport state changed:', state);
         });
 
-        // Step 8: Produce video and audio
         console.log('LOG: 8. Producing video and audio tracks');
         const videoTrack = stream.getVideoTracks()[0];
         const audioTrack = stream.getAudioTracks()[0];
@@ -201,7 +211,6 @@ const TeacherPage: React.FC = () => {
           return;
         }
 
-        // Step 9: Create consumer transport for teacher (to see own stream)
         console.log('LOG: 9. Creating consumer transport');
         const consumerTransportData = await new Promise<any>((resolve, reject) => {
           console.log('LOG: Emitting createConsumerTransport');
@@ -233,7 +242,6 @@ const TeacherPage: React.FC = () => {
           console.log('LOG: Consumer transport state changed:', state);
         });
 
-        // Step 11: Consume video
         if (videoProducerRef.current) {
           console.log('LOG: 11. Consuming video');
           const videoConsumerData = await new Promise<any>((resolve, reject) => {
@@ -296,6 +304,7 @@ const TeacherPage: React.FC = () => {
       socket.off('connect');
       socket.off('connect_error');
       socket.off('disconnect');
+      socket.off('chat');
       if (streamRef.current) {
         console.log('LOG: Stopping media tracks');
         streamRef.current.getTracks().forEach((track) => track.stop());
@@ -442,8 +451,24 @@ const TeacherPage: React.FC = () => {
     }
   };
 
+  const sendMessage = () => {
+    if (chatInput.trim()) {
+      console.log('LOG: Sending chat message:', chatInput);
+      socket.emit('chat', { message: chatInput }, ({ success }: { success: boolean }) => {
+        console.log('LOG: Chat message sent, success:', success);
+      });
+      setChatInput('');
+    }
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && chatInput.trim()) {
+      sendMessage();
+    }
+  };
+
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <h1>Teacher Dashboard</h1>
       {error && <p style={{ color: 'red' }}>{error}</p>}
       <div style={{ display: 'flex', gap: '20px' }}>
@@ -465,6 +490,27 @@ const TeacherPage: React.FC = () => {
         <div>
           <h3>Remote Video (Mirror)</h3>
           <video ref={remoteVideoRef} autoPlay playsInline muted={false} style={{ width: '300px' }} />
+        </div>
+      </div>
+      <div style={{ width: '600px', border: '1px solid #ccc', padding: '10px' }}>
+        <h3>Chat</h3>
+        <div style={{ height: '200px', overflowY: 'auto', border: '1px solid #ddd', padding: '10px', marginBottom: '10px' }}>
+          {messages.map((msg, index) => (
+            <div key={index}>
+              <strong>{msg.role}:</strong> {msg.message}
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <input
+            type="text"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyPress={handleKeyPress}
+            placeholder="Type a message..."
+            style={{ flex: 1, padding: '5px' }}
+          />
+          <button onClick={sendMessage}>Send</button>
         </div>
       </div>
     </div>
